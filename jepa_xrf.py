@@ -383,28 +383,35 @@ def probe(args, data, test, device):
 
     lab = first_trials(train_items, args.label_trials)
     Xtr, Ytr = feats(lab, wifi_tr)
+    # Collapse diagnostic on the raw (unstandardized) features: effective rank = exp(entropy of
+    # normalized singular values) of the centered feature matrix; d means all directions are used.
+    sv = torch.linalg.svdvals(Xtr - Xtr.mean(0))
+    pr = sv / sv.sum()
+    eff_rank = float(torch.exp(-(pr * torch.log(pr + 1e-12)).sum()))
+    print(f"feature effective rank {eff_rank:.1f} / {d}, mean per-dim std {Xtr.std(0).mean():.4f}")
     mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6           # feature standardization from the labeled train set only
     Xtr = ((Xtr - mu) / sd).to(device)
     Ytr = Ytr.to(device)
+    # Full-batch training for a fixed number of steps, independent of the number of labeled samples
+    # (the earlier mini-batch/epoch version gave few-shot probes far fewer updates -> under-fitting).
     head = nn.Linear(d, N_CLS).to(device)
-    opt = torch.optim.AdamW(head.parameters(), lr=1e-3, weight_decay=args.probe_wd)
-    g = torch.Generator(device="cpu").manual_seed(args.seed)
-    for ep in range(args.probe_epochs):
-        perm = torch.randperm(len(Xtr), generator=g).to(device)
-        for i in range(0, len(Xtr), 256):
-            idx = perm[i:i + 256]
-            loss = F.cross_entropy(head(Xtr[idx]), Ytr[idx])
-            opt.zero_grad(); loss.backward(); opt.step()
+    opt = torch.optim.AdamW(head.parameters(), lr=args.probe_lr, weight_decay=args.probe_wd)
+    for it in range(args.probe_steps):
+        loss = F.cross_entropy(head(Xtr), Ytr)
+        opt.zero_grad(); loss.backward(); opt.step()
     with torch.no_grad():
+        train_loss = F.cross_entropy(head(Xtr), Ytr).item()
         train_acc = (head(Xtr).argmax(1) == Ytr).float().mean().item()
     Xte, Yte = feats(test_items, wifi_te)
     with torch.no_grad():
         test_acc = (head(((Xte - mu) / sd).to(device)).argmax(1).cpu() == Yte).float().mean().item()
     res = {"mode": "probe", "encoder": args.which, "test_acc": test_acc, "train_acc": train_acc,
+           "train_loss": train_loss, "probe_steps": args.probe_steps, "feature_effective_rank": eff_rank,
            "n_labeled": len(lab), "label_trials": args.label_trials, "n_test": len(test_items),
            "ckpt": args.ckpt, "args": vars(args), "env": env_info()}
     save_json(res, os.path.join(args.out_dir, f"probe_{args.which}_lt{args.label_trials}.json"))
-    print(f"PROBE ({args.which}) labeled={len(lab)} train_acc={train_acc:.4f} TEST acc={test_acc:.4f} (n={len(test_items)})")
+    print(f"PROBE ({args.which}) labeled={len(lab)} train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
+          f"TEST acc={test_acc:.4f} (n={len(test_items)})")
 
 
 def train_classifier(args, data, test, device, pretrained):
@@ -491,7 +498,8 @@ def main():
     # evaluation
     p.add_argument("--ckpt", default=None, help="encoder.pth from pretrain (probe / finetune)")
     p.add_argument("--which", choices=["target", "online"], default="target", help="which pretrained encoder to use")
-    p.add_argument("--probe_epochs", type=int, default=200)
+    p.add_argument("--probe_steps", type=int, default=3000, help="full-batch optimizer steps for the linear probe")
+    p.add_argument("--probe_lr", type=float, default=1e-2)
     p.add_argument("--probe_wd", type=float, default=1e-4)
     args = p.parse_args()
 
