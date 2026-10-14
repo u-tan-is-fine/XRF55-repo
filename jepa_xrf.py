@@ -419,9 +419,15 @@ def train_classifier(args, data, test, device, pretrained):
     test_items, wifi_te = test
     if pretrained:
         enc, mean, std, d = load_encoder(args.ckpt, args.which, device)
+        model = Classifier(enc, d).to(device)
+    elif args.model == "resnet18":
+        # Same data, normalization, optimizer, schedule and evaluation as the Transformer runs;
+        # only the network differs. Uses the repository's model/resnet1d.py (plain ResNet-18).
+        from model import resnet1d
+        model = resnet1d.resnet18().to(device)
     else:
         enc, d = Encoder(args.d, args.depth, args.heads, args.patch).to(device), args.d
-    model = Classifier(enc, d).to(device)
+        model = Classifier(enc, d).to(device)
     lab = first_trials(train_items, args.label_trials)
     g = torch.Generator().manual_seed(args.seed)
     dl = loader(WifiSet(lab, wifi_tr, mean, std), args, True, g)
@@ -481,6 +487,8 @@ def main():
     p.add_argument("--depth", type=int, default=4)
     p.add_argument("--heads", type=int, default=4)
     p.add_argument("--patch", type=int, default=20, help="time steps per token (1000 must be divisible)")
+    p.add_argument("--model", choices=["transformer", "resnet18"], default="transformer",
+                   help="network for --mode supervised (resnet18 = model/resnet1d.resnet18 from the repo)")
     # pretraining
     p.add_argument("--pred_dim", type=int, default=128)
     p.add_argument("--pred_depth", type=int, default=2)
